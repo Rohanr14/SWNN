@@ -4,11 +4,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from statsmodels.tsa.arima.model import ARIMA
+from pmdarima import auto_arima
 from prophet import Prophet
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
 from swnn import SynapseWeightedNeuralNetwork
 
 # Data preprocessing function
@@ -54,45 +55,63 @@ def train_swnn(X_train, y_train, X_test):
     predictions = [model.forward(x)[0] for x in X_test]
     return np.array(predictions)
 
-# ARIMA model
+# Auto ARIMA model
 @st.cache_data
-def train_arima(data):
-    # Infer frequency
-    freq = pd.infer_freq(data.index)
-    if freq is None:
-        freq = 'D'  # Default to daily if can't infer
-    
-    model = ARIMA(data, order=(5,1,0), freq=freq)
-    model_fit = model.fit()
-    return model_fit.forecast(steps=len(data))
+def train_auto_arima(data):
+    model = auto_arima(data, start_p=1, start_q=1, max_p=5, max_q=5, m=7,
+                       start_P=0, seasonal=True, d=1, D=1, trace=True,
+                       error_action='ignore', suppress_warnings=True, stepwise=True)
+    return model.predict(n_periods=len(data))
 
-# Prophet model
+# Prophet model with automatic seasonality detection
 @st.cache_data
 def train_prophet(data):
     df = data.reset_index()
     df.columns = ['ds', 'y']
-    model = Prophet()
+    
+    # Detect seasonality
+    freq = pd.infer_freq(df['ds'])
+    if freq in ['D', 'H']:
+        seasonality_mode = 'additive'
+    else:
+        seasonality_mode = 'multiplicative'
+    
+    model = Prophet(seasonality_mode=seasonality_mode, weekly_seasonality=True, yearly_seasonality=True)
+    if freq == 'H':
+        model.add_seasonality(name='hourly', period=24, fourier_order=5)
+    
     model.fit(df)
-    future = model.make_future_dataframe(periods=len(data), freq='D')
+    future = model.make_future_dataframe(periods=len(data), freq=freq)
     forecast = model.predict(future)
     return forecast['yhat'].values
 
-# LSTM model
+# LSTM model with early stopping
 @st.cache_data
 def train_lstm(X_train, y_train, X_test):
     model = Sequential([
-        LSTM(50, activation='relu', input_shape=(X_train.shape[1], 1)),
+        LSTM(100, activation='relu', return_sequences=True, input_shape=(X_train.shape[1], 1)),
+        LSTM(50, activation='relu'),
         Dense(1)
     ])
     model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
     
+    early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for epoch in range(50):  # Reduced number of epochs
-        model.fit(X_train, y_train, epochs=1, batch_size=32, verbose=0)
-        progress_bar.progress((epoch + 1) / 50)
-        status_text.text(f"LSTM Training Progress: {epoch+1}/50 epochs")
+    history = model.fit(
+        X_train, y_train,
+        epochs=100,
+        batch_size=32,
+        validation_split=0.2,
+        callbacks=[early_stopping],
+        verbose=0
+    )
+    
+    for epoch, loss in enumerate(history.history['loss']):
+        progress_bar.progress((epoch + 1) / 100)
+        status_text.text(f"LSTM Training Progress: {epoch+1}/100 epochs, Loss: {loss:.4f}")
     
     status_text.text("LSTM Training Complete!")
     return model.predict(X_test)
@@ -145,12 +164,12 @@ def main():
         # Model selection
         models_to_run = st.multiselect(
             "Select models to run",
-            ["SWNN", "ARIMA", "Prophet", "LSTM"],
-            default=["SWNN", "ARIMA", "Prophet", "LSTM"]
+            ["SWNN", "Auto ARIMA", "Prophet", "LSTM"],
+            default=["SWNN", "Auto ARIMA", "Prophet", "LSTM"]
         )
 
         # Prepare data
-        n_steps = 3  # Fixed number of time steps
+        n_steps = st.slider("Select number of time steps for SWNN and LSTM", min_value=1, max_value=10, value=3)
         X, y, scaler = prepare_data(df.values, n_steps)
         train_size = int(len(X) * 0.7)
         X_train, X_test = X[:train_size], X[train_size:]
@@ -162,9 +181,9 @@ def main():
             if "SWNN" in models_to_run:
                 st.text("Training SWNN...")
                 models['SWNN'] = train_swnn(X_train, y_train, X_test)
-            if "ARIMA" in models_to_run:
-                st.text("Training ARIMA...")
-                models['ARIMA'] = train_arima(df.iloc[:, 0])
+            if "Auto ARIMA" in models_to_run:
+                st.text("Training Auto ARIMA...")
+                models['Auto ARIMA'] = train_auto_arima(df.iloc[:, 0])
             if "Prophet" in models_to_run:
                 st.text("Training Prophet...")
                 models['Prophet'] = train_prophet(df)
@@ -190,7 +209,7 @@ def main():
         # Display results
         st.subheader('Model Performance Comparison')
         results_df = pd.DataFrame(results).T
-        st.table(results_df.style.highlight_min(axis=0))
+        st.table(results_df.style.highlight_min(axis=0, color='blue'))
 
         # Plot predictions
         st.subheader('Predictions Visualization')
