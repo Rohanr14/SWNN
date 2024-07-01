@@ -106,5 +106,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Thanks to all contributors and users of this project.
 - Special thanks to the creators and maintainers of the libraries used for comparison models.
